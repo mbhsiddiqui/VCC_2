@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from storage import load_tasks, save_tasks
+from storage import StorageError, load_tasks, save_tasks
 from task_manager import add_task, complete_task, list_tasks
 
 
@@ -13,7 +13,10 @@ def build_parser():
     commands = parser.add_subparsers(dest="command", required=True)
     add = commands.add_parser("add", help="Create a task")
     add.add_argument("title")
-    commands.add_parser("list", help="List all tasks")
+    add.add_argument("--description", default="", help="Optional task details")
+    listing = commands.add_parser("list", help="List tasks by completion status")
+    listing.add_argument("--status", choices=("all", "pending", "completed"),
+                         default="all", help="Show all, pending, or completed tasks")
     complete = commands.add_parser("complete", help="Complete a task")
     complete.add_argument("task_id")
     return parser
@@ -21,10 +24,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    tasks = load_tasks(args.data_file)
     try:
+        tasks = load_tasks(args.data_file)
         if args.command == "add":
-            task = add_task(tasks, args.title)
+            task = add_task(tasks, args.title, args.description)
             save_tasks(args.data_file, tasks)
             print(f"Created task {task['id']}: {task['title']}")
         elif args.command == "complete":
@@ -32,12 +35,17 @@ def main(argv=None):
             save_tasks(args.data_file, tasks)
             print(f"Completed task {task['id']}: {task['title']}")
         else:
-            matches = list_tasks(tasks)
+            matches = list_tasks(tasks, args.status)
             if not matches:
                 print("No tasks found.")
             for task in matches:
                 status = "completed" if task["completed"] else "pending"
                 print(f"{task['id']} [{status}] {task['title']}")
+                if task["description"]:
+                    print(f"  {task['description']}")
+    except StorageError as error:
+        print(f"Storage error: {error}", file=sys.stderr)
+        return 1
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2

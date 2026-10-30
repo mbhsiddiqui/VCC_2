@@ -1,6 +1,14 @@
 # Contributing
 
-Use Python 3 and the standard library. Run `python3 -m unittest -v` before proposing a change. Test CLI commands with an explicit temporary `--data-file` so personal tasks are unaffected.
+Use Python 3 and the standard library. Run these checks from the repository before proposing a change:
+
+```sh
+python3 -m unittest -v
+python3 -m py_compile devflow.py task_manager.py storage.py test_devflow.py
+git diff --check
+```
+
+Verify that unittest reports a nonzero test count. The suite isolates data in temporary directories and tests both task APIs and separate CLI processes. Test CLI commands with an explicit temporary `--data-file` so personal tasks are unaffected.
 
 ## Workflow
 

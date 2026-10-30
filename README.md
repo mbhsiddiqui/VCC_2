@@ -21,6 +21,12 @@ Creation accepts a nonempty title and an optional description. Titles are trimme
 
 Listing defaults to all tasks. Use `list --status all`, `list --status pending`, or `list --status completed` to select a status. Results retain creation order; an empty selection prints `No tasks found.` Invalid status values are rejected.
 
-Safer persistence and expanded tests will arrive through separate issue-linked PRs. Storage currently uses basic JSON reads and direct writes; malformed JSON and operating-system failures are not yet handled gracefully. Do not use this introductory baseline for important data or concurrent writes.
+## Persistence and errors
+
+JSON records are validated on read and write. Missing files represent an empty list; listing does not create or rewrite a database. A save writes a temporary file in the same directory, flushes and synchronizes it, then atomically replaces the database. Existing task fields, including extra metadata and legacy string IDs, are preserved. The parent directory must already exist.
+
+Malformed JSON, invalid task records, invalid UTF-8, and filesystem errors produce concise diagnostics on stderr and exit code 1. Task-input errors return 2; successful commands return 0. Rejected input and unreadable databases are never silently replaced with empty data. Back up important task data. This tool supports one writer at a time: atomic replacement prevents partial writes, but there is no locking to protect concurrent read-modify-write operations.
+
+[Issue #5](https://github.com/mbhsiddiqui/VCC_2/issues/5) records the genuine malformed-JSON crash in the baseline. The crash is corrected with controlled diagnostics and preservation tests here; the issue remains open for the assignment's required bug documentation, pending instructor-directed closure. Expanded automated coverage follows in its own enhancement PR.
 
 `devflow.py` handles arguments and output, `task_manager.py` holds task operations, `storage.py` handles JSON, and `test_devflow.py` tests core operations and task creation. See CONTRIBUTING.md for the review workflow.

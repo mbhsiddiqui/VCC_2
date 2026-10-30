@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID
 
-from storage import load_tasks, save_tasks
+from storage import StorageError, load_tasks, save_tasks
 from task_manager import add_task, complete_task, list_tasks
 
 
@@ -178,6 +178,143 @@ class FilteringTests(unittest.TestCase):
                 text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "No tasks found.")
+
+
+class StorageTests(unittest.TestCase):
+    def test_unicode_legacy_ids_and_metadata_survive(self):
+        tasks = [{"id": "1", "title": "Réviser 日本語", "description": "✓", "completed": False,
+                  "metadata": {"priority": "high"}}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            save_tasks(path, tasks)
+            loaded = load_tasks(path)
+            add_task(loaded, "Another task")
+            save_tasks(path, loaded)
+            self.assertEqual(load_tasks(path)[0], tasks[0])
+            self.assertIn("日本語", path.read_text(encoding="utf-8"))
+
+    def test_missing_read_does_not_create_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.json"
+            self.assertEqual(load_tasks(path), [])
+            self.assertFalse(path.exists())
+
+    def test_malformed_json_is_controlled_and_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            path.write_text("{")
+            for command in (["list"], ["add", "Valid title"], ["complete", "1"]):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        [sys.executable, str(Path(__file__).with_name("devflow.py")),
+                         "--data-file", str(path)] + command,
+                        text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("malformed JSON", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(path.read_bytes(), b"{")
+
+    def test_invalid_utf8_is_controlled_and_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            path.write_bytes(b"\xff")
+            with self.assertRaisesRegex(StorageError, "UTF-8"):
+                load_tasks(path)
+            self.assertEqual(path.read_bytes(), b"\xff")
+
+    def test_invalid_schema_is_rejected_without_rewriting(self):
+        valid = {"id": "1", "title": "Task", "description": "", "completed": False}
+        cases = [{}, [None], [{**valid, "id": " "}], [{**valid, "title": ""}],
+                 [{**valid, "description": None}], [{**valid, "completed": 1}],
+                 [valid, valid], [{"id": "1"}]]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            for tasks in cases:
+                with self.subTest(tasks=tasks):
+                    path.write_text(json.dumps(tasks))
+                    before = path.read_bytes()
+                    with self.assertRaises(StorageError):
+                        load_tasks(path)
+                    self.assertEqual(path.read_bytes(), before)
+                    with self.assertRaises(StorageError):
+                        save_tasks(path, tasks)
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_replace_failure_preserves_old_database_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            tasks = []
+            add_task(tasks, "Original")
+            save_tasks(path, tasks)
+            before = path.read_bytes()
+            add_task(tasks, "New")
+            with patch("storage.os.replace", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(StorageError, "not replaced"):
+                    save_tasks(path, tasks)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(Path(directory).glob(".devflow-*.tmp")), [])
+
+    def test_sync_failure_preserves_old_database_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            save_tasks(path, [])
+            before = path.read_bytes()
+            with patch("storage.os.fsync", side_effect=OSError("disk failure")):
+                with self.assertRaises(StorageError):
+                    save_tasks(path, [])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(Path(directory).glob(".devflow-*.tmp")), [])
+
+    def test_read_permission_error_is_controlled(self):
+        with patch("storage.Path.open", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(StorageError, "Cannot read"):
+                load_tasks("tasks.json")
+
+    def test_missing_parent_cli_save_has_useful_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing" / "tasks.json"
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("devflow.py")),
+                 "--data-file", str(path), "add", "Task"],
+                text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("parent directory", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(path.parent.exists())
+
+    def test_unserializable_metadata_preserves_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            tasks = []
+            task = add_task(tasks, "Valid task")
+            save_tasks(path, tasks)
+            before = path.read_bytes()
+            task["extra"] = object()
+            with self.assertRaises(StorageError):
+                save_tasks(path, tasks)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(Path(directory).glob(".devflow-*.tmp")), [])
+
+    def test_separate_cli_invocations_preserve_and_complete_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            prefix = [sys.executable, str(Path(__file__).with_name("devflow.py")),
+                      "--data-file", str(path)]
+            def run(*args):
+                result = subprocess.run(prefix + list(args), text=True,
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result
+            run("add", "First")
+            first = load_tasks(path)[0]
+            run("add", "Second")
+            self.assertEqual(load_tasks(path)[0], first)
+            run("complete", first["id"])
+            before = path.read_bytes()
+            self.assertIn("First", run("list", "--status", "completed").stdout)
+            self.assertIn("Second", run("list", "--status", "pending").stdout)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(len(load_tasks(path)), 2)
 
 
 if __name__ == "__main__":

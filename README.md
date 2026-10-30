@@ -27,6 +27,13 @@ JSON records are validated on read and write. Missing files represent an empty l
 
 Malformed JSON, invalid task records, invalid UTF-8, and filesystem errors produce concise diagnostics on stderr and exit code 1. Task-input errors return 2; successful commands return 0. Rejected input and unreadable databases are never silently replaced with empty data. Back up important task data. This tool supports one writer at a time: atomic replacement prevents partial writes, but there is no locking to protect concurrent read-modify-write operations.
 
-[Issue #5](https://github.com/mbhsiddiqui/VCC_2/issues/5) records the genuine malformed-JSON crash in the baseline. The crash is corrected with controlled diagnostics and preservation tests here; the issue remains open for the assignment's required bug documentation, pending instructor-directed closure. Expanded automated coverage follows in its own enhancement PR.
+[Issue #5](https://github.com/mbhsiddiqui/VCC_2/issues/5) records the genuine malformed-JSON crash in the baseline. The crash is corrected with controlled diagnostics and preservation tests here; the issue remains open for the assignment's required bug documentation, pending instructor-directed closure.
 
-`devflow.py` handles arguments and output, `task_manager.py` holds task operations, `storage.py` handles JSON, and `test_devflow.py` tests core operations and task creation. See CONTRIBUTING.md for the review workflow.
+`devflow.py` handles arguments and output, `task_manager.py` holds task operations, `storage.py` handles JSON, and `test_devflow.py` contains unit tests and real-process CLI workflow tests. See CONTRIBUTING.md for the review workflow.
+
+
+## Verify changes
+
+Run `python3 -m unittest -v` from this repository. The suite covers creation, filtering, completion, cross-process persistence, Unicode, invalid input, corrupted databases, and safe-write failure handling. Tests use temporary directories and do not touch your normal task database. Permission failures are simulated where needed so the suite does not depend on the account running it.
+
+Run `python3 -m py_compile devflow.py task_manager.py storage.py test_devflow.py` for syntax checks and `git diff --check` before committing. Keep generated `__pycache__/` directories excluded locally. Historical baseline defect reproduction is separate from the final passing regression suite; current malformed JSON returns a controlled error without modifying data.

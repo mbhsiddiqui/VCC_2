@@ -1,4 +1,4 @@
-"""Focused tests of the initial task tracker."""
+"""Unit and subprocess integration tests for DevFlow task workflows."""
 
 from pathlib import Path
 from copy import deepcopy
@@ -315,6 +315,159 @@ class StorageTests(unittest.TestCase):
             self.assertIn("Second", run("list", "--status", "pending").stdout)
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(len(load_tasks(path)), 2)
+
+
+class CLIWorkflowTests(unittest.TestCase):
+    """Run each command in a real process with an isolated working directory."""
+
+    def setUp(self):
+        self.workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(self.workspace.cleanup)
+        self.directory = Path(self.workspace.name)
+        self.database = self.directory / "tasks.json"
+        self.script = Path(__file__).resolve().with_name("devflow.py")
+
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, str(self.script), *args],
+                              cwd=self.directory, text=True, capture_output=True,
+                              timeout=10)
+
+    def assert_error(self, result, code, message):
+        self.assertEqual(result.returncode, code)
+        self.assertEqual(result.stdout, "")
+        self.assertIn(message, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_help_and_missing_command_never_create_database(self):
+        help_result = self.run_cli("--help")
+        self.assertEqual(help_result.returncode, 0)
+        self.assertIn("add", help_result.stdout)
+        self.assertIn("list", help_result.stdout)
+        self.assertIn("complete", help_result.stdout)
+        self.assertEqual(help_result.stderr, "")
+        self.assert_error(self.run_cli(), 2, "required")
+        self.assertFalse(self.database.exists())
+
+    def test_missing_task_arguments_are_parse_errors(self):
+        for args in (("add",), ("complete",), ("unknown-command",)):
+            with self.subTest(args=args):
+                self.assert_error(self.run_cli(*args), 2, "error:")
+        self.assertFalse(self.database.exists())
+
+    def test_empty_listing_does_not_create_default_database(self):
+        for args in (("list",), ("list", "--status", "pending"),
+                     ("list", "--status", "completed")):
+            with self.subTest(args=args):
+                result = self.run_cli(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "No tasks found.")
+                self.assertEqual(result.stderr, "")
+        self.assertFalse(self.database.exists())
+        self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_invalid_input_never_creates_missing_database(self):
+        self.assert_error(self.run_cli("add", "   "), 2, "nonempty")
+        self.assert_error(self.run_cli("complete", "unknown"), 2, "not found")
+        self.assertFalse(self.database.exists())
+
+    def test_rejected_commands_preserve_existing_database(self):
+        self.assertEqual(self.run_cli("add", "Keep me").returncode, 0)
+        before = self.database.read_bytes()
+        for args, message in ((("add", "\t "), "nonempty"),
+                              (("complete", "unknown"), "not found"),
+                              (("list", "--status", "invalid"), "invalid choice")):
+            with self.subTest(args=args):
+                self.assert_error(self.run_cli(*args), 2, message)
+                self.assertEqual(self.database.read_bytes(), before)
+
+    def test_repeated_completion_is_idempotent(self):
+        self.assertEqual(self.run_cli("add", "Finish once").returncode, 0)
+        task_id = load_tasks(self.database)[0]["id"]
+        first = self.run_cli("complete", task_id)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn(task_id, first.stdout)
+        before = self.database.read_bytes()
+        repeated = self.run_cli("complete", task_id)
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(self.database.read_bytes(), before)
+        self.assertEqual(len(load_tasks(self.database)), 1)
+        self.assertIs(load_tasks(self.database)[0]["completed"], True)
+
+    def test_default_path_full_workflow_and_unicode(self):
+        first = self.run_cli("add", "  Réviser 日本語  ", "--description", "Vérifier ✓")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        initial = load_tasks(self.database)[0]
+        self.assertEqual(initial["title"], "Réviser 日本語")
+        self.assertEqual(initial["description"], "Vérifier ✓")
+        self.assertIn(initial["id"], first.stdout)
+        self.assertEqual(self.run_cli("add", "Second task").returncode, 0)
+        listing = self.run_cli("list")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertIn("Réviser 日本語", listing.stdout)
+        self.assertIn("Vérifier ✓", listing.stdout)
+        self.assertIn("Second task", listing.stdout)
+        self.assertLess(listing.stdout.index("Réviser 日本語"),
+                        listing.stdout.index("Second task"))
+        self.assertEqual(self.run_cli("complete", initial["id"]).returncode, 0)
+        pending = self.run_cli("list", "--status", "pending")
+        completed = self.run_cli("list", "--status", "completed")
+        self.assertEqual(pending.returncode, 0, pending.stderr)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Second task", pending.stdout)
+        self.assertNotIn("Réviser 日本語", pending.stdout)
+        self.assertIn("Réviser 日本語", completed.stdout)
+        self.assertNotIn("Second task", completed.stdout)
+        records = load_tasks(self.database)
+        self.assertEqual([record["completed"] for record in records], [True, False])
+        self.assertEqual(records[0]["description"], "Vérifier ✓")
+
+    def test_invalid_schema_cli_preserves_bytes_and_has_no_stdout(self):
+        self.database.write_text('[{"id": "1"}]')
+        before = self.database.read_bytes()
+        for args in (("list",), ("add", "Valid title"), ("complete", "1")):
+            with self.subTest(args=args):
+                self.assert_error(self.run_cli(*args), 1, "Storage error:")
+                self.assertEqual(self.database.read_bytes(), before)
+
+    def test_unreadable_directory_cli_has_controlled_error(self):
+        database_directory = self.directory / "database-directory"
+        database_directory.mkdir()
+        result = self.run_cli("--data-file", str(database_directory), "list")
+        self.assert_error(result, 1, "Cannot read task database")
+        self.assertEqual(list(database_directory.iterdir()), [])
+
+    def test_invalid_utf8_cli_preserves_original_bytes(self):
+        self.database.write_bytes(b"\xff")
+        result = self.run_cli("add", "Valid task")
+        self.assert_error(result, 1, "UTF-8")
+        self.assertEqual(self.database.read_bytes(), b"\xff")
+
+
+class StorageFailureTests(unittest.TestCase):
+    def test_cleanup_failure_does_not_mask_original_write_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            save_tasks(path, [])
+            before = path.read_bytes()
+            original_error = PermissionError("replacement denied")
+            with patch("storage.os.replace", side_effect=original_error):
+                with patch("storage.Path.unlink", side_effect=OSError("cleanup denied")):
+                    with self.assertRaises(StorageError) as caught:
+                        save_tasks(path, [])
+            self.assertIs(caught.exception.__cause__, original_error)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_unencodable_text_does_not_replace_existing_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            save_tasks(path, [])
+            before = path.read_bytes()
+            tasks = []
+            add_task(tasks, "Bad surrogate: " + chr(0xD800))
+            with self.assertRaises(StorageError):
+                save_tasks(path, tasks)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(Path(directory).glob(".devflow-*.tmp")), [])
 
 
 if __name__ == "__main__":

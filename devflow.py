@@ -13,6 +13,7 @@ def build_parser():
     commands = parser.add_subparsers(dest="command", required=True)
     add = commands.add_parser("add", help="Create a task")
     add.add_argument("title")
+    add.add_argument("--description", default="", help="Optional task details")
     commands.add_parser("list", help="List all tasks")
     complete = commands.add_parser("complete", help="Complete a task")
     complete.add_argument("task_id")
@@ -24,7 +25,7 @@ def main(argv=None):
     tasks = load_tasks(args.data_file)
     try:
         if args.command == "add":
-            task = add_task(tasks, args.title)
+            task = add_task(tasks, args.title, args.description)
             save_tasks(args.data_file, tasks)
             print(f"Created task {task['id']}: {task['title']}")
         elif args.command == "complete":
@@ -38,6 +39,8 @@ def main(argv=None):
             for task in matches:
                 status = "completed" if task["completed"] else "pending"
                 print(f"{task['id']} [{status}] {task['title']}")
+                if task["description"]:
+                    print(f"  {task['description']}")
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2

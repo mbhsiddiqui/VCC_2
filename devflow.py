@@ -14,7 +14,9 @@ def build_parser():
     add = commands.add_parser("add", help="Create a task")
     add.add_argument("title")
     add.add_argument("--description", default="", help="Optional task details")
-    commands.add_parser("list", help="List all tasks")
+    listing = commands.add_parser("list", help="List tasks by completion status")
+    listing.add_argument("--status", choices=("all", "pending", "completed"),
+                         default="all", help="Show all, pending, or completed tasks")
     complete = commands.add_parser("complete", help="Complete a task")
     complete.add_argument("task_id")
     return parser
@@ -33,7 +35,7 @@ def main(argv=None):
             save_tasks(args.data_file, tasks)
             print(f"Completed task {task['id']}: {task['title']}")
         else:
-            matches = list_tasks(tasks)
+            matches = list_tasks(tasks, args.status)
             if not matches:
                 print("No tasks found.")
             for task in matches:

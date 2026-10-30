@@ -23,9 +23,14 @@ def add_task(tasks, title, description=""):
     return task
 
 
-def list_tasks(tasks):
-    """Return tasks in their original order."""
-    return list(tasks)
+def list_tasks(tasks, status="all"):
+    """Return matching tasks in original order without changing the collection."""
+    if status not in ("all", "pending", "completed"):
+        raise ValueError("Task status must be all, pending, or completed.")
+    if status == "all":
+        return list(tasks)
+    completed = status == "completed"
+    return [task for task in tasks if task["completed"] == completed]
 
 
 def complete_task(tasks, task_id):

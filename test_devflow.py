@@ -1,6 +1,7 @@
 """Focused tests of the initial task tracker."""
 
 from pathlib import Path
+from copy import deepcopy
 import json
 import subprocess
 import sys
@@ -102,6 +103,81 @@ class CreationTests(unittest.TestCase):
             self.assertEqual(invalid.returncode, 2)
             self.assertIn("nonempty", invalid.stderr)
             self.assertEqual(path.read_bytes(), before)
+
+
+class FilteringTests(unittest.TestCase):
+    def setUp(self):
+        self.tasks = []
+        self.first = add_task(self.tasks, "First pending")
+        self.second = add_task(self.tasks, "Completed item")
+        self.third = add_task(self.tasks, "Last pending")
+        complete_task(self.tasks, self.second["id"])
+
+    def test_all_is_the_default_and_returns_a_separate_list(self):
+        result = list_tasks(self.tasks)
+        self.assertEqual(result, self.tasks)
+        self.assertIsNot(result, self.tasks)
+        result.pop()
+        self.assertEqual(len(self.tasks), 3)
+
+    def test_pending_and_completed_keep_original_order(self):
+        before = deepcopy(self.tasks)
+        self.assertEqual(list_tasks(self.tasks, "pending"), [self.first, self.third])
+        self.assertEqual(list_tasks(self.tasks, "completed"), [self.second])
+        self.assertEqual(self.tasks, before)
+
+    def test_empty_selections(self):
+        for status in ("all", "pending", "completed"):
+            with self.subTest(status=status):
+                self.assertEqual(list_tasks([], status), [])
+        self.assertEqual(list_tasks([self.second], "pending"), [])
+        self.assertEqual(list_tasks([self.first], "completed"), [])
+
+    def test_invalid_status_is_rejected_without_mutation(self):
+        before = deepcopy(self.tasks)
+        for status in ("done", "", None, 1):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(ValueError, "status"):
+                    list_tasks(self.tasks, status)
+        self.assertEqual(self.tasks, before)
+
+    def test_cli_filters_persisted_mixed_states_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            save_tasks(path, self.tasks)
+            before = path.read_bytes()
+            prefix = [sys.executable, str(Path(__file__).with_name("devflow.py")),
+                      "--data-file", str(path), "list"]
+            for status, included, excluded in (
+                ("all", ["First pending", "Completed item", "Last pending"], []),
+                ("pending", ["First pending", "Last pending"], ["Completed item"]),
+                ("completed", ["Completed item"], ["First pending", "Last pending"]),
+            ):
+                with self.subTest(status=status):
+                    result = subprocess.run(prefix + ["--status", status],
+                                            text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for title in included:
+                        self.assertIn(title, result.stdout)
+                    for title in excluded:
+                        self.assertNotIn(title, result.stdout)
+                    self.assertEqual(path.read_bytes(), before)
+            invalid = subprocess.run(prefix + ["--status", "done"],
+                                     text=True, capture_output=True, timeout=10)
+            self.assertEqual(invalid.returncode, 2)
+            self.assertIn("invalid choice", invalid.stderr)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_cli_empty_filter_has_clear_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            save_tasks(path, [self.first])
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("devflow.py")),
+                 "--data-file", str(path), "list", "--status", "completed"],
+                text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "No tasks found.")
 
 
 if __name__ == "__main__":
